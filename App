@@ -1,0 +1,149 @@
+# app.R
+
+library(shiny)
+library(quantmod)
+library(ggplot2)
+library(dplyr)
+library(plotly)
+
+ui <- fluidPage(
+  titlePanel("Stock Price Viewer"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      textInput("tickers", "Enter Stock Tickers (comma-separated):", "AAPL, MSFT"),
+      dateRangeInput(
+        "dateRange",
+        "Select Date Range:",
+        start = Sys.Date() - 30,
+        end = Sys.Date()
+      ),
+      selectInput(
+        "plotType",
+        "Select Plot Type:",
+        choices = c("Closing Price" = "price", 
+                    "Percent Change" = "percent_change", 
+                    "Candlestick Plot" = "candlestick")
+      ),
+      actionButton("fetch", "Fetch Data")
+    ),
+    
+    mainPanel(
+      uiOutput("dynamicPlotOutput")
+    )
+  )
+)
+
+server <- function(input, output, session) {
+  stock_data <- reactiveVal(NULL)
+  
+  observeEvent(input$fetch, {
+    req(input$tickers)
+    
+    tickers <- strsplit(input$tickers, ",")[[1]]
+    tickers <- trimws(tickers)
+    start_date <- input$dateRange[1]
+    end_date <- input$dateRange[2]
+    
+    all_data <- list()
+    
+    for (ticker in tickers) {
+      tryCatch({
+        data <- getSymbols(ticker, src = "yahoo", auto.assign = FALSE, from = start_date, to = end_date)
+        data <- data %>% 
+          as.data.frame() %>%
+          mutate(Date = index(data), Ticker = ticker)
+        colnames(data) <- gsub("^[^.]+\\.", "", colnames(data)) # Clean column names
+        data <- data %>%
+          mutate(PercentChange = (Close / lag(Close) - 1) * 100) # Calculate percent change
+        all_data[[ticker]] <- data
+      }, error = function(e) {
+        showNotification(paste("Error fetching data for", ticker), type = "error")
+      })
+    }
+    
+    stock_data(bind_rows(all_data))
+  })
+  
+  output$dynamicPlotOutput <- renderUI({
+    if (input$plotType == "candlestick") {
+      req(stock_data())
+      
+      tickers <- unique(stock_data()$Ticker)
+      
+      # Create separate plotly outputs for each ticker
+      plotOutputs <- lapply(tickers, function(ticker) {
+        plotlyOutput(outputId = paste0("candlestick_", ticker))
+      })
+      
+      do.call(tagList, plotOutputs)
+    } else {
+      plotOutput("stockPlot")
+    }
+  })
+  
+  output$stockPlot <- renderPlot({
+    req(stock_data())
+    
+    data <- stock_data()
+    
+    if (input$plotType == "price") {
+      ggplot(data, aes(x = Date, y = Close, color = Ticker)) +
+        geom_line(size = 1) +
+        labs(
+          title = "Stock Prices",
+          x = "Date",
+          y = "Closing Price",
+          color = "Ticker"
+        ) +
+        theme_minimal()
+    } else if (input$plotType == "percent_change") {
+      ggplot(data, aes(x = Date, y = PercentChange, color = Ticker)) +
+        geom_line(size = 1) +
+        labs(
+          title = "Percent Change in Closing Price",
+          x = "Date",
+          y = "Percent Change (%)",
+          color = "Ticker"
+        ) +
+        theme_minimal()
+    }
+  })
+  
+  observe({
+    req(stock_data())
+    
+    if (input$plotType == "candlestick") {
+      tickers <- unique(stock_data()$Ticker)
+      data <- stock_data()
+      
+      for (ticker in tickers) {
+        local({
+          ticker_data <- data %>% filter(Ticker == ticker)
+          
+          outputId <- paste0("candlestick_", ticker)
+          
+          output[[outputId]] <- renderPlotly({
+            plot_ly(
+              data = ticker_data,
+              x = ~Date,
+              type = "candlestick",
+              open = ~Open,
+              high = ~High,
+              low = ~Low,
+              close = ~Close,
+              name = ticker
+            ) %>%
+              layout(
+                title = paste("Candlestick Plot for", ticker),
+                xaxis = list(title = "Date"),
+                yaxis = list(title = "Price")
+              )
+          })
+        })
+      }
+    }
+  })
+}
+
+shinyApp(ui = ui, server = server)
